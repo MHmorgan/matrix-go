@@ -21,116 +21,30 @@ const (
 var (
 	RandChar = make(chan rune)
 
+	Ascii      = flag.Bool("ascii", false, "Use only ASCII characters")
 	NoLatin    = flag.Bool("no-latin", false, "Disable latin extended characters")
 	NoGreek    = flag.Bool("no-greek", false, "Disable greek characters")
-	NoCyrillic = flag.Bool("no-cyril", false, "Disable cyrillic characters")
+	NoCyrillic = flag.Bool("no-cyrillic", false, "Disable cyrillic characters")
 	Help       = flag.Bool("help", false, "Show help")
 )
 
-// -----------------------------------------------------------------------------
-// Column
-
-type Column struct {
-	WindowHeight int
-	Offset       int
-	Chars        []rune
-	Height       int
-	Finished     bool
-}
-
-func NewColumn(height int) *Column {
-	wh := ColumnMinHeight + rand.Intn(height-ColumnMinHeight)
-
-	chars := make([]rune, height)
-	for i := range chars {
-		chars[i] = ' '
-	}
-
-	return &Column{
-		WindowHeight: wh,
-		Offset:       -wh,
-		Chars:        chars,
-		Height:       height,
-	}
-}
-
-func (c *Column) EndOffset() int {
-	return c.Offset + c.WindowHeight
-}
-
-func (c *Column) Char(i int) string {
-	ch := c.Chars[i]
-
-	if i == c.EndOffset() {
-		return fmt.Sprintf("%s%s%c%s%s", FgWhite, Bold, ch, Reset, FgDefault)
-	}
-
-	if c.EndOffset()-2 <= i && i < c.EndOffset() {
-		return fmt.Sprintf("%s%c%s", FgWhite, ch, FgDefault)
-	}
-
-	if c.Offset <= i && i <= c.Offset+2 {
-		return fmt.Sprintf("%s%s%c%s%s", FgGreen, Dim, ch, Reset, FgDefault)
-	}
-
-	return fmt.Sprintf("%s%c%s", FgGreen, ch, FgDefault)
-}
-
-func (c *Column) Update() {
-	if c.Finished {
-		return
-	}
-
-	// Remove old top character
-	if c.Offset >= 0 {
-		c.Chars[c.Offset] = ' '
-	}
-
-	// Update offset
-	c.Offset++
-	if c.Offset >= c.Height {
-		c.Finished = true
-		return
-	}
-
-	// Add new bottom character
-	if c.EndOffset() < c.Height {
-		c.Chars[c.EndOffset()] = <-RandChar
-	}
-
-	// Update a single random character in the window
-	idx := c.Offset + rand.Intn(c.WindowHeight)
-	if 0 < idx && idx < c.Height {
-		c.Chars[idx] = <-RandChar
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Screen
-
 type Screen struct {
-	Columns []*Column
+	Columns []Column
 	Height  int
 	Width   int
 }
 
-func content(ch chan<- string, height, width int) {
-	screen := NewScreen(height, width)
-	for range time.Tick(DrawInterval) {
-		screen.Update()
-		ch <- screen.String()
-	}
-}
-
 func NewScreen(height, width int) *Screen {
 	return &Screen{
-		Columns: make([]*Column, width),
+		Columns: make([]Column, width),
 		Height:  height,
 		Width:   width,
 	}
 }
 
 func (s *Screen) Update() {
+	// Randomly add a new column. This seems to create a nice distribution
+	// similar to the original matrix, with minimal logic.
 	idx := rand.Intn(len(s.Columns))
 	if s.Columns[idx] == nil {
 		s.Columns[idx] = NewColumn(s.Height)
@@ -141,7 +55,7 @@ func (s *Screen) Update() {
 			continue
 		}
 		c.Update()
-		if c.Finished {
+		if c.Finished() {
 			s.Columns[i] = nil
 		}
 	}
@@ -151,15 +65,16 @@ func (s *Screen) String() string {
 	sb := strings.Builder{}
 	sb.Grow(s.Height * s.Width)
 
+	// Build the entire screen as a single string, line by line.
 	for i := 0; i < s.Height; i++ {
 		if i > 0 {
 			sb.WriteByte('\n')
 		}
-		for j := 0; j < s.Width; j++ {
-			if s.Columns[j] == nil {
+		for _, c := range s.Columns {
+			if c == nil {
 				sb.WriteByte(' ')
 			} else {
-				sb.WriteString(s.Columns[j].Char(i))
+				sb.WriteString(c.Char(i))
 			}
 		}
 	}
@@ -167,7 +82,13 @@ func (s *Screen) String() string {
 	return sb.String()
 }
 
-// -----------------------------------------------------------------------------
+func generateContent(ch chan<- string, height, width int) {
+	screen := NewScreen(height, width)
+	for range time.Tick(DrawInterval) {
+		screen.Update()
+		ch <- screen.String()
+	}
+}
 
 func generateChars() {
 	var chars []rune
@@ -181,7 +102,7 @@ func generateChars() {
 	}
 
 	// Latin
-	if !*NoLatin {
+	if !(*NoLatin || *Ascii) {
 		for i := 0x00C0; i <= 0x00FF; i++ {
 			r := rune(i)
 			if unicode.IsLetter(r) {
@@ -191,7 +112,7 @@ func generateChars() {
 	}
 
 	// Greek
-	if !*NoGreek {
+	if !(*NoGreek || *Ascii) {
 		for i := 0x0370; i <= 0x03FF; i++ {
 			r := rune(i)
 			if unicode.IsLetter(r) {
@@ -201,7 +122,7 @@ func generateChars() {
 	}
 
 	// Cyrillic
-	if !*NoCyrillic {
+	if !(*NoCyrillic || *Ascii) {
 		for i := 0x0400; i <= 0x04FF; i++ {
 			r := rune(i)
 			if unicode.IsLetter(r) {
@@ -210,24 +131,44 @@ func generateChars() {
 		}
 	}
 
+	/*
+		// Jog: this can even be evaluated at compile time
+		chars := [ rune(i) for i := 33; i <= 126; i++ if unicode.IsPrint(rune(i)) ]
+
+		if !(*NoLatin || *Ascii) {
+			chars += [ rune(i) for i := 0x00C0; i <= 0x00FF; i++ if unicode.IsLetter(rune(i)) ]
+		}
+
+		if !(*NoGreek || *Ascii) {
+			chars += [ rune(i) for i := 0x0370; i <= 0x03FF; i++ if unicode.IsLetter(rune(i)) ]
+		}
+
+		if !(*NoCyrillic || *Ascii) {
+			chars += [ rune(i) for i := 0x0400; i <= 0x04FF; i++ if unicode.IsLetter(rune(i)) ]
+		}
+	*/
+
 	for {
 		RandChar <- chars[rand.Intn(len(chars))]
 	}
 }
 
 func main() {
+	//@Error panic(err)
 
-	if len(os.Args) < 3 || *Help {
+	flag.Parse()
+	if len(flag.Args()) != 2 || *Help {
 		fmt.Println("Usage: matrix [options] <width> <height>")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	width, err := strconv.Atoi(os.Args[1])
+	//width := strconv.Atoi(flag.Arg(0))?
+	width, err := strconv.Atoi(flag.Arg(0))
 	if err != nil {
 		panic(err)
 	}
-	height, err := strconv.Atoi(os.Args[2])
+	height, err := strconv.Atoi(flag.Arg(1))
 	if err != nil {
 		panic(err)
 	}
@@ -246,11 +187,11 @@ func main() {
 		os.Exit(0)
 	}()
 
+	ch := make(chan string, 1)
 	go generateChars()
-	screens := make(chan string, 1)
-	go content(screens, height, width)
+	go generateContent(ch, height, width)
 
-	for s := range screens {
-		fmt.Print(Home, s)
+	for text := range ch {
+		fmt.Print(Home, text)
 	}
 }
